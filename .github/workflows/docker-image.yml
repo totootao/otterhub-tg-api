@@ -38,6 +38,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 校验 compose 文件语法与变量插值（无需 Docker daemon）
+      - name: Validate compose file
+        run: |
+          TG_DOMAIN=ci.example.invalid PROXY_TOKEN=ci-token \
+          TELEGRAM_API_ID=1 TELEGRAM_API_HASH=ci-hash \
+          TG_PROXY=socks5://127.0.0.1:7890 \
+            docker compose -f docker-compose.yml config -q
+          echo "compose config OK"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

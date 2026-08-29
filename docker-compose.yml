@@ -19,6 +19,9 @@ services:
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID:?请在 .env 中配置 TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?请在 .env 中配置 TELEGRAM_API_HASH}
+      # MTProto 出站代理（可选）：国内服务器连不上 Telegram DC 时配置
+      # 二进制原生读取该环境变量（等价于 --mtproto-proxy 选项）
+      TELEGRAM_PROXY: ${TG_PROXY:-}
       # 额外启动参数，如 --verbosity=2
       EXTRA_ARGS: ${TBA_EXTRA_ARGS:-}
     volumes:

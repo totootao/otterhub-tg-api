@@ -33,7 +33,8 @@ Cloudflare Worker / otterhub-server
 │  telegram-bot-api 容器（--local 模式）    │
 │  上传 2000MB / 下载无限制 / HTTP only    │
 └──────────────┬──────────────────────────┘
-               │  MTProto（TCP 443 直连 Telegram DC）
+               │  MTProto（TCP 443 连 Telegram DC）
+               │  ← 可选：TG_PROXY 配置后全部流量经代理转发
                ▼
         Telegram 数据中心
 ```
@@ -50,8 +51,9 @@ Cloudflare Worker / otterhub-server
 2. **一个域名**：划一个子域名（如 `tg.example.com`）做 A 记录指向服务器公网 IP，**务必 DNS only（灰云）**
    - 原因一：Cloudflare 代理（橙云）对请求体有 100MB 上限，会掐断大文件上传
    - 原因二：灰云直连时 Caddy 才能通过 HTTP-01 挑战自动签证书
-3. **服务器**：Docker + Docker Compose；**必须能直连 Telegram DC**（MTProto，TCP 443）
-   - 国内服务器通常出站不通 Telegram：要么把本服务部署在海外 VPS，要么用 iptables 透明转发把到 Telegram DC 网段的流量转给可出墙的出口（注意：TDLib 不读 `HTTP_PROXY` 环境变量）
+3. **服务器**：Docker + Docker Compose；需能连上 Telegram DC（MTProto，TCP 443）
+   - 海外 VPS：开箱直连，无需任何额外配置
+   - 国内服务器：出站通常不通 Telegram，配置 `TG_PROXY` 即可（见下节「代理模式」，原生 MTProto 代理支持，无需 iptables/透明代理/TUN）
 4. **构建资源**：首次源码编译约需 2GB+ 内存、20~40 分钟（CI 或服务器上构建均可）
 
 ## 快速开始
@@ -74,6 +76,30 @@ TG_DOMAIN=tg.example.com PROXY_TOKEN=xxx ./scripts/verify.sh 123456:ABC-xxxx
 ```
 
 验证通过后，`https://<TG_DOMAIN>` 就是你的专属 Bot API 端点，接口路径与 `api.telegram.org` 完全一致（`/bot<token>/<method>`、`/file/bot<token>/<path>`）。
+
+## 代理模式（国内服务器）
+
+官方 `telegram-bot-api` 二进制本身不支持给 MTProto 连接配代理（自带的 `--proxy` 选项只管 webhook 出站）。本仓库给上游源码打了一个补丁（`telegram-bot-api/patches/0001-mtproto-proxy.patch`），调用 **TDLib 原生的 `addProxy` 能力**，在 TDLib 发起到 DC 的任何连接之前注册并启用代理——bot 登录、消息收发、2GB 文件上传下载，全部流量走代理。配置风格参考 [tangyoha/telegram_media_downloader](https://github.com/tangyoha/telegram_media_downloader) 的 proxy 配置（scheme/hostname/port/username/password），此处统一为 URL 写法。
+
+在 `.env` 中取消注释并填写：
+
+```bash
+# Clash/V2Ray 常见的 SOCKS5（最常用）
+TG_PROXY=socks5://127.0.0.1:7890
+# 带认证：socks5://user:password@host:port
+# HTTP 代理（需支持 HTTP CONNECT 透明隧道）：http://host:port
+# MTProto 代理：mtproto://secret@host:port
+```
+
+然后 `docker compose up -d` 重新创建容器即可。生效验证：`docker compose logs telegram-bot-api` 会出现 `Adding MTProto proxy 127.0.0.1:7890` 与 `MTProto proxy enabled for all connections to Telegram DCs`。
+
+细节说明：
+
+- **等价的命令行/环境变量**：补丁同时给二进制增加了 `--mtproto-proxy` 选项与 `TELEGRAM_PROXY` 环境变量（compose 里 `TG_PROXY` 就是透传给它的），语义与 `--api-id`/`TELEGRAM_API_ID` 一致，CLI 优先于环境变量
+- **格式**：`scheme://[user:password@]host:port`；socks5/socks/http/mtproto 四种 scheme（socks 视为 socks5）；userinfo 支持 `%XX` 百分号编码；IPv6 地址写 `[::1]:1080`；端口必填
+- **协议覆盖**：socks5、http（CONNECT 隧道）、mtproto；**不支持 socks4**（参考项目支持，但 TDLib 协议层没有 socks4 实现）
+- **代理建议**：2GB 分片场景下代理吞吐就是上传速度上限，建议用本地低延迟代理（如同机 Clash）或专线，避免公共代理
+- **补丁维护**：补丁在 Dockerfile 构建阶段以 `git apply` 应用；若上游改动导致上下文漂移，构建会**明确失败**（而不是静默丢掉代理能力），此时需基于新源码重新生成补丁（`git diff` 后替换 patch 文件）。Dockerfile 里还有一道自检：编译产物 `--help` 必须包含 `--mtproto-proxy`，否则构建失败
 
 ## 迁移现有 Bot（重要）
 
@@ -122,9 +148,16 @@ Cloudflare Workers 出站 fetch 仅支持部分端口（80/443/8080/8443/2052 �
 两种方式：
 - 服务器上：`git pull && docker compose up -d --build`（Dockerfile 默认跟随上游 master）
 - CI：每周一 04:00 UTC 自动重建；配置好 Docker Hub Secrets 后也会自动推送新镜像
+若上游源码改动导致 MTProto 代理补丁应用失败，构建会报 `git apply` 错误——按「代理模式」一节的补丁维护说明重新生成补丁即可。
+
+**Q: 配了 TG_PROXY 但 bot 连不上 Telegram？**
+按顺序排查：`docker compose logs telegram-bot-api` 看 `MTProto proxy enabled` 日志是否出现（没出现说明 `TELEGRAM_PROXY` 没传进容器，检查 `.env` 的 `TG_PROXY` 是否生效）；出现了但连不上，则是代理本身不通或出口到 Telegram DC 被断，在服务器上直接测代理连通性：`curl -x socks5h://host:port https://api.telegram.org/`。
+
+**Q: 代理会拖慢上传下载吗？**
+会。全部 DC 流量经代理转发，代理吞吐即速度上限。同机 Clash（127.0.0.1）开销最小；跨机/公共代理在大文件场景下不建议。
 
 **Q: 怎么固定版本？**
-上游仓库没有发 tag，用 commit SHA 固定。在 `.env` 中设置 `TBA_REF=<40位SHA>` 后 `docker compose build`。已验证可用快照：`e3e9dd8e5b3d7ab8537cd5a10dc31d5ffa8f82d1`（2026-08-25）。
+上游仓库没有发 tag，用 commit SHA 固定。在 `.env` 中设置 `TBA_REF=<40位SHA>` 后 `docker compose build`。已验证可用快照：`e3e9dd8e5b3d7ab8537cd5a10dc31d5ffa8f82d1`（2026-08-25，代理补丁即基于该版本制作）。
 
 **Q: 首次 CI 构建显示"仅构建验证，未推送"？**
 本仓库还未配置 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` Secrets（Secrets 不跨仓库共享）。到仓库 Settings → Secrets and variables → Actions 添加后，手动触发 workflow 并勾选 `push_image` 即可推送镜像 `totootao/otterhub-tg-api`。
@@ -136,8 +169,10 @@ Cloudflare Workers 出站 fetch 仅支持部分端口（80/443/8080/8443/2052 �
 
 ```
 ├── telegram-bot-api/
-│   ├── Dockerfile              # 官方源码多阶段构建（--local）
-│   └── docker-entrypoint.sh    # 参数拼装（api-id/api-hash/dir/local）
+│   ├── Dockerfile              # 官方源码多阶段构建（--local），含补丁应用与自检
+│   ├── docker-entrypoint.sh    # 参数拼装（api-id/api-hash/dir/local）
+│   └── patches/
+│       └── 0001-mtproto-proxy.patch  # MTProto 出站代理支持（TDLib 原生 addProxy）
 ├── caddy/
 │   └── Caddyfile               # TLS 终止 + x-proxy-token 校验 + 流式反代
 ├── scripts/

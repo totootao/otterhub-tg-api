@@ -30,10 +30,20 @@ RUN git init . \
     && git checkout --detach FETCH_HEAD \
     && git submodule update --init --recursive --depth 1
 
+# 应用 OtterHub 补丁（MTProto 出站代理支持，TDLib 原生 addProxy）
+# 若上游改动导致补丁无法应用，构建会在此明确失败（而非静默丢掉代理能力）
+COPY patches/*.patch /tmp/patches/
+RUN git apply --stat /tmp/patches/*.patch \
+    && git apply /tmp/patches/*.patch
+
 # 编译并安装到 /usr/local/bin（完整 TDLib 编译，约 15~35 分钟）
 RUN mkdir -p build && cd build \
     && cmake -DCMAKE_BUILD_TYPE=Release .. \
     && cmake --build . --target install -j"$(nproc)"
+
+# 构建产物自检：确认补丁已生效（--help 必须列出 --mtproto-proxy 选项）
+RUN /usr/local/bin/telegram-bot-api --help 2>&1 | grep -q 'mtproto-proxy' \
+    || { echo 'ERROR: --mtproto-proxy option missing, patch not applied?'; exit 1; }
 
 # ---------- 运行阶段 ----------
 FROM ubuntu:24.04
