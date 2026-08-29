@@ -1,0 +1,21 @@
+# OtterHub TG API 反向代理层
+# 职责：TLS 终止（自动签发 Let's Encrypt）+ x-proxy-token 访问防护 + 流式转发
+# 环境变量由 docker compose 注入：
+#   TG_DOMAIN    对外域名
+#   PROXY_TOKEN  访问令牌（与 otterhub-server TG_API_BASE 配置里的 token 字段一致）
+#
+# 约定：otterhub-server 的 tgFetch（functions/utils/tg-proxy.ts）在 TG_API_BASE
+# 配置为对象数组时自动附带 x-proxy-token 头，与本处校验闭环。
+
+{$TG_DOMAIN} {
+	# 令牌校验：未携带或错误的 x-proxy-token 一律 403
+	@unauthorized not header x-proxy-token {$PROXY_TOKEN}
+	respond @unauthorized "Forbidden" 403
+
+	# 反代到容器网络内的 telegram-bot-api（纯 HTTP）
+	# flush_interval -1：逐字节即时转发，保证大文件下载为流式响应、不被缓冲
+	# Caddy 默认不缓冲请求体、无请求体大小上限，满足 2GB 上传
+	reverse_proxy telegram-bot-api:8081 {
+		flush_interval -1
+	}
+}

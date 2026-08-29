@@ -1,0 +1,90 @@
+name: Docker Image
+
+# 构建 telegram-bot-api Server 镜像并推送 Docker Hub
+# 所需 Secrets（仓库 Settings -> Secrets and variables -> Actions）：
+#   DOCKERHUB_USERNAME  Docker Hub 用户名（totootao）
+#   DOCKERHUB_TOKEN     Docker Hub 访问令牌
+# 未配置 Secrets 时：仅构建验证（CI 绿灯，验证 Dockerfile 正确性），不推送
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 4 * * 1"  # 每周一 04:00 UTC 自动重建，跟随上游 master
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: "Push image to Docker Hub (requires valid secrets)"
+        type: boolean
+        default: false
+      tba_ref:
+        description: "tdlib/telegram-bot-api 引用（master 或 commit SHA）"
+        type: string
+        default: "master"
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+      SHOULD_PUSH: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || inputs.push_image == true) && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: env.SHOULD_PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME || 'totootao' }}/otterhub-tg-api
+          tags: |
+            # master 分支 → latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # 每次构建附加短 commit sha
+            type=sha,format=short
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./telegram-bot-api
+          platforms: linux/amd64
+          push: ${{ env.SHOULD_PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TBA_REF=${{ inputs.tba_ref || 'master' }}
+          # 注：C++ 源码层随上游变动，层缓存命中率有限，仅作兜底
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build result summary
+        run: |
+          {
+            echo "## Docker image build"
+            echo ""
+            echo "- upstream ref: \`${{ inputs.tba_ref || 'master' }}\`"
+            echo "- pushed: ${{ env.SHOULD_PUSH == 'true' }}"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+            if [ "${{ env.HAS_DOCKERHUB }}" != "true" ]; then
+              echo ""
+              echo "> ⚠️ 未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN Secrets，本次仅构建验证，未推送镜像。"
+              echo "> 到 Settings → Secrets and variables → Actions 添加后，手动触发本 workflow 并勾选 push_image 即可推送。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

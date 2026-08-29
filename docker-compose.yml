@@ -1,0 +1,51 @@
+# ============================================================
+# OtterHub 自建 Telegram Bot API Server（2GB 方案）
+# telegram-bot-api（官方源码构建，--local 模式）+ Caddy（TLS 终止 + 访问防护）
+# 配置：cp .env.example .env 并填写
+# 启动：docker compose up -d --build（首次需源码编译，约 20~40 分钟）
+# ============================================================
+
+services:
+  telegram-bot-api:
+    # 默认使用 CI 推送的 Docker Hub 镜像；在服务器上源码构建用：
+    #   docker compose up -d --build
+    image: ${TBA_IMAGE:-totootao/otterhub-tg-api:latest}
+    build:
+      context: ./telegram-bot-api
+      args:
+        # 固定上游版本：填 tdlib/telegram-bot-api 的 commit SHA（默认跟随 master）
+        TBA_REF: ${TBA_REF:-master}
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?请在 .env 中配置 TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?请在 .env 中配置 TELEGRAM_API_HASH}
+      # 额外启动参数，如 --verbosity=2
+      EXTRA_ARGS: ${TBA_EXTRA_ARGS:-}
+    volumes:
+      # bot 会话 + file_id 数据库（删除即需重新 logOut 迁移 bot）
+      - tba-data:/var/lib/telegram-bot-api
+    # 8081 仅暴露给容器网络，不映射到宿主机（由 Caddy 做 TLS 后转达）
+    expose:
+      - "8081"
+    # 健康检查由镜像内置 HEALTHCHECK 负责
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"    # HTTP-01 证书挑战 + 跳转 HTTPS
+      - "443:443"  # 对外服务端口（CF Workers 出站 fetch 允许）
+    environment:
+      TG_DOMAIN: ${TG_DOMAIN:?请在 .env 中配置 TG_DOMAIN}
+      PROXY_TOKEN: ${PROXY_TOKEN:?请在 .env 中配置 PROXY_TOKEN}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # TLS 证书
+      - caddy-config:/config
+    depends_on:
+      - telegram-bot-api
+
+volumes:
+  tba-data:
+  caddy-data:
+  caddy-config:
