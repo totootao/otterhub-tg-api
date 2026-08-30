@@ -77,6 +77,82 @@ TG_DOMAIN=tg.example.com PROXY_TOKEN=xxx ./scripts/verify.sh 123456:ABC-xxxx
 
 验证通过后，`https://<TG_DOMAIN>` 就是你的专属 Bot API 端点，接口路径与 `api.telegram.org` 完全一致（`/bot<token>/<method>`、`/file/bot<token>/<path>`）。
 
+## 单容器运行（docker run）
+
+不需要 Caddy/TLS 全套编排时（内网测试、已有自研网关等场景），可以只跑 `telegram-bot-api` 一个容器：
+
+```bash
+docker run -d \
+  --name telegram-bot-api \
+  --restart unless-stopped \
+  -p 8081:8081 \
+  -e TELEGRAM_API_ID=<你的api_id> \
+  -e TELEGRAM_API_HASH=<你的api_hash> \
+  -v tba-data:/var/lib/telegram-bot-api \
+  totootao/otterhub-tg-api:latest
+```
+
+需要出站代理（国内服务器）时加一个 `-e TELEGRAM_PROXY`，语义与 compose 里的 `TG_PROXY` 完全一致：
+
+```bash
+docker run -d \
+  --name telegram-bot-api \
+  --restart unless-stopped \
+  -p 8081:8081 \
+  -e TELEGRAM_API_ID=<你的api_id> \
+  -e TELEGRAM_API_HASH=<你的api_hash> \
+  -e TELEGRAM_PROXY=socks5://user:password@proxy-host:1080 \
+  -v tba-data:/var/lib/telegram-bot-api \
+  totootao/otterhub-tg-api:latest
+```
+
+**代理跑在宿主机上（如同机 Clash `127.0.0.1:7890`）**：默认 bridge 网络里容器内的 `127.0.0.1` 指向容器自身而非宿主机，改用 `--network host` 共享宿主机网络栈（此时 `-p` 映射失效，服务直接监听宿主机 8081）：
+
+```bash
+docker run -d \
+  --name telegram-bot-api \
+  --restart unless-stopped \
+  --network host \
+  -e TELEGRAM_API_ID=<你的api_id> \
+  -e TELEGRAM_API_HASH=<你的api_hash> \
+  -e TELEGRAM_PROXY=socks5://127.0.0.1:7890 \
+  -v tba-data:/var/lib/telegram-bot-api \
+  totootao/otterhub-tg-api:latest
+```
+
+参数说明：
+
+| 参数 | 说明 |
+|---|---|
+| `-p 8081:8081` | 容器 8081 映射到宿主机 8081；HTTP 明文，仅限内网/测试 |
+| `-e TELEGRAM_API_ID` / `-e TELEGRAM_API_HASH` | 必填，[my.telegram.org](https://my.telegram.org) 申请 |
+| `-e TELEGRAM_PROXY` | 可选，MTProto 出站代理 URL（等价于 `--mtproto-proxy` 选项），留空直连 |
+| `-e EXTRA_ARGS` | 可选，透传额外启动参数，如 `--verbosity=2` |
+| `-e HTTP_PORT` | 可选，改容器内监听端口（默认 8081，配合 `-p` 使用） |
+| `-v tba-data:/var/lib/telegram-bot-api` | bot 会话 + file_id 数据库持久化；删卷 = 所有 bot 需重新 logOut 迁移 |
+
+启动后验证：
+
+```bash
+docker ps --filter name=telegram-bot-api        # STATUS 应显示 (healthy)，镜像内置 HEALTHCHECK
+docker logs telegram-bot-api 2>&1 | grep -i proxy  # 配了代理应出现 MTProto proxy enabled
+curl -s "http://127.0.0.1:8081/bot000:health/getMe"  # 有 JSON 响应即 HTTP 层存活
+```
+
+两条注意事项：
+
+- **明文风险**：直连 8081 没有 TLS，bot token 在 HTTP 里裸奔。仅限内网或已有 TLS 网关的场景；公网部署请回到 compose 全套（Caddy 自动 TLS + `x-proxy-token` 校验）
+- **镜像来源**：`docker run` 直接拉 `totootao/otterhub-tg-api:latest` 的前提是 Docker Hub Secrets 已配置并完成过推送（见常见问题）。镜像还没推上去时，先在仓库根目录本地构建再运行：
+
+  ```bash
+  docker build -t otterhub-tg-api:local telegram-bot-api/
+  docker run -d --name telegram-bot-api --restart unless-stopped \
+    -p 8081:8081 \
+    -e TELEGRAM_API_ID=<你的api_id> -e TELEGRAM_API_HASH=<你的api_hash> \
+    -v tba-data:/var/lib/telegram-bot-api \
+    otterhub-tg-api:local
+  ```
+
 ## 代理模式（国内服务器）
 
 官方 `telegram-bot-api` 二进制本身不支持给 MTProto 连接配代理（自带的 `--proxy` 选项只管 webhook 出站）。本仓库给上游源码打了一个补丁（`telegram-bot-api/patches/0001-mtproto-proxy.patch`），调用 **TDLib 原生的 `addProxy` 能力**，在 TDLib 发起到 DC 的任何连接之前注册并启用代理——bot 登录、消息收发、2GB 文件上传下载，全部流量走代理。配置风格参考 [tangyoha/telegram_media_downloader](https://github.com/tangyoha/telegram_media_downloader) 的 proxy 配置（scheme/hostname/port/username/password），此处统一为 URL 写法。
